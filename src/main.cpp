@@ -15,7 +15,6 @@
 
 #include <FS.h>
 
-
 std::vector<String> mainNetworkList = {"1744193321", "3939444277", "2147483647", "4444", "5555"};
 std::set<String> receivedMessageIds; // مجموعه شناسه‌های پیام‌های دریافتی
 std::vector<std::pair<String, int>> RelayOnNode;
@@ -63,16 +62,18 @@ bool buttonPressedFlags[4] = {false, false, false, false}; // پرچم‌های 
 
 const char *appConfigFilename = "/appConfigDataFile.txt"; // نام فایل برای ذخیره‌سازی داده‌ها
 
-#define buzzer_pin 4
+#define buzzer_pin 14
 
-#define pir_1_pin 13
+#define pir_1_pin 18
 #define pir_2_pin 22
 #define pir_3_pin 23
-#define Relay_1_pin 12
+#define Relay_1_pin 120
 
-#define Remote_Key_0_Pin 14
+#define Sensor_pin_SW_420 12
+
+#define Remote_Key_0_Pin 4
 #define Remote_Key_1_Pin 27
-#define Remote_Key_2_Pin 260
+#define Remote_Key_2_Pin 160
 #define Remote_Key_3_Pin 25
 
 volatile int state1 = 0; // وضعیت رله 1
@@ -90,10 +91,9 @@ volatile bool key4Pressed = false; // برای شناسایی دکمه فشرد�
 
 DynamicJsonDocument sharedDoc(1024);
 
-#define LOCAL_ALERT_PIN 18       // پین LED محلی
+#define LOCAL_ALERT_PIN 26       // پین LED محلی
 #define REMOTE_ALERT_PIN 19      // پین LED ریموت
 #define Device_Is_Arm_Led_Pin 21 // پین LED ریموت
-#define Device_IsConnectedPin 21 // پین LED ریموت
 
 #define LocalControllerLedPin 2  // پین
 #define LOCAL_LED_BLINK_COUNT 10 // پین LED محلی
@@ -119,6 +119,7 @@ unsigned long lastReconnectAttempt = 0; // برای تایمر تلاش مجدد
 
 TaskHandle_t taskReconnectMesh;
 TaskHandle_t taskcheckAllPir;
+TaskHandle_t taskCheckSensor_SW_420;
 
 bool reconnectMeshTaskRunning = false;
 bool checkPIR1TaskRunning = false;
@@ -158,9 +159,11 @@ int reconnectAttempts = 0;         // شمارنده تلاش‌ها
 void displayNodeInfo();
 
 void onNewConnection(uint32_t nodeId);
-
-void AllarmError(const int &CountInSec, const int &totalSecends, const int &OnTime_1Meen100);
+void AllarmError(const int &CountInSec, const int &totalSecends, const int &On_Off_Time_1Meen100);
+void VibrationAllarmError(const int &CountInSec, const int &totalSecends, const int &On_Off_Time_1Meen100);
 String sendStartupSMS(String function_number, String function_msg);
+void CheckSensor_SW_420(void *parameter);
+
 void reconnectMeshTask(void *parameter);
 void checkAllPirTask(void *parameter);
 void checkAllPIR(); // پیش‌اعلام تابع checkPIR
@@ -240,15 +243,18 @@ bool initModuleSim808(String command, String expectedResponse, int timeout)
     return false;            // اگر پاسخ موردنظر در زمان مشخص دریافت نشود
 }
 
-void monitorInputSms() {
+void monitorInputSms()
+{
     // بررسی اگر SIM808 داده‌ای ارسال کرده است
-    if (SIM808.available()) {
+    if (SIM808.available())
+    {
         String response = SIM808.readString();
         Serial.println("Raw Response from SIM808:");
         Serial.println(response);
 
         // بررسی وجود پاسخ پیامک
-        if (response.indexOf("+CMGR:") != -1) {
+        if (response.indexOf("+CMGR:") != -1)
+        {
             int senderStartIndex = response.indexOf("\",\"") + 3;
             int senderEndIndex = response.indexOf("\"", senderStartIndex);
             String senderNumber = response.substring(senderStartIndex, senderEndIndex);
@@ -263,42 +269,49 @@ void monitorInputSms() {
             Serial.print("Message Text: ");
             Serial.println(smsText);
             Serial.println("-------------------------------------");
-        } else {
+        }
+        else
+        {
             Serial.println("No valid SMS data found.");
         }
     }
 }
 
 // ارسال دستورات AT به SIM808
-void sendATCommandSSSS(String command) {
+void sendATCommandSSSS(String command)
+{
     Serial.println("Sending AT Command: " + command);
-    SIM808.println(command);  // ارسال دستور AT به SIM808
-    delay(1000);  // منتظر پاسخ از SIM808
-    while (SIM808.available()) {
-        Serial.write(SIM808.read());  // چاپ پاسخ از SIM808
+    SIM808.println(command); // ارسال دستور AT به SIM808
+    delay(1000);             // منتظر پاسخ از SIM808
+    while (SIM808.available())
+    {
+        Serial.write(SIM808.read()); // چاپ پاسخ از SIM808
     }
 }
 
 // خواندن و ارسال فایل صوتی به SIM808
-void sendAudioFileToSIM808(const char* filePath) {
-    if (!SPIFFS.exists(filePath)) {
+void sendAudioFileToSIM808(const char *filePath)
+{
+    if (!SPIFFS.exists(filePath))
+    {
         Serial.println("Audio file not found!");
         return;
     }
 
     File audioFile = SPIFFS.open(filePath, "r");
-    if (!audioFile) {
+    if (!audioFile)
+    {
         Serial.println("Failed to open audio file!");
         return;
     }
 
     Serial.println("Streaming audio file to SIM808...");
-    while (audioFile.available()) {
+    while (audioFile.available())
+    {
         char audioBuffer[64];
         size_t bytesRead = audioFile.readBytes(audioBuffer, sizeof(audioBuffer));
-        SIM808.write((uint8_t*)audioBuffer, bytesRead);
+        SIM808.write((uint8_t *)audioBuffer, bytesRead);
         delay(10); // تنظیم نرخ ارسال
-        
     }
 
     audioFile.close();
@@ -306,19 +319,23 @@ void sendAudioFileToSIM808(const char* filePath) {
 }
 
 // اجرای تماس و ارسال فایل صوتی
-void makeCall(String phoneNumber) {
+void makeCall(String phoneNumber)
+{
     // ارسال دستور تماس
-    String atCommand = "ATD" + phoneNumber + ";";  // دستور تماس
+    String atCommand = "ATD" + phoneNumber + ";"; // دستور تماس
     Serial.println("Dialing: " + phoneNumber);
-    sendATCommandSSSS(atCommand);  // ارسال دستور تماس
+    sendATCommandSSSS(atCommand); // ارسال دستور تماس
 
     // انتظار برای دریافت پاسخ "CONNECT" از SIM808 برای اطمینان از برقراری تماس
     unsigned long startTime = millis();
     bool callConnected = false;
-    while (millis() - startTime < 10000) {  // انتظار حداکثر 10 ثانیه
-        if (SIM808.available()) {
+    while (millis() - startTime < 10000)
+    { // انتظار حداکثر 10 ثانیه
+        if (SIM808.available())
+        {
             String response = SIM808.readString();
-            if (response.indexOf("CONNECT") != -1) {
+            if (response.indexOf("CONNECT") != -1)
+            {
                 Serial.println("Call connected!");
                 callConnected = true;
                 break;
@@ -326,20 +343,21 @@ void makeCall(String phoneNumber) {
         }
     }
 
-    if (callConnected) {
+    if (callConnected)
+    {
         // ارسال فایل صوتی هنگام برقراری تماس
         sendAudioFileToSIM808("/allarmVoice.amr");
-    } else {
+    }
+    else
+    {
         Serial.println("Failed to connect the call.");
     }
 
     // قطع تماس پس از ارسال فایل
-    delay(1000); // مدت زمان ارسال صوت
-    sendATCommandSSSS("ATH");  // دستور قطع تماس
+    delay(1000);              // مدت زمان ارسال صوت
+    sendATCommandSSSS("ATH"); // دستور قطع تماس
     Serial.println("Call ended.");
 }
- 
-
 
 String sendStartupSMS(String function_number, String function_msg)
 {
@@ -370,9 +388,10 @@ String sendStartupSMS(String function_number, String function_msg)
     Serial.println("send    " + String(function_msg) + "to  :   " + String(function_number));
     return "true";
 }
-#define PWR_PIN 26
- 
-void powerOnSIM808() {
+#define PWR_PIN 26456
+
+void powerOnSIM808()
+{
     pinMode(PWR_PIN, OUTPUT);
     digitalWrite(PWR_PIN, LOW);  // اتصال به GND
     delay(2000);                 // نگه داشتن به مدت 2 ثانیه
@@ -446,7 +465,7 @@ void CheckSpaceSensorTask()
     vTaskDelay(100);
     if (smokValue > 800)
     {
-        AllarmError(5, 5, 1);
+        // AllarmError(0, 0, 0);
         Serial.println("gas gas gas gas gas gas gas gas gas gas gas gas gas gas gas");
     }
 }
@@ -589,20 +608,37 @@ void saveData(const String &key, const String &value)
     }
 }
 
-void AllarmError(const int &CountInSec, const int &totalSecends, const int &OnTime_1Meen100)
+void VibrationAllarmError(const int &CountInSec, const int &totalSecends, const int &On_Off_Time_1Meen100)
 {
-    for (int i = 0; i < totalSecends; i++)
+    for (int i = 0; i < CountInSec; i++)
     {
-        for (int j = 0; j < CountInSec; j++)
+        for (int j = 0; j < totalSecends; j++)
+        {
+            digitalWrite(buzzer_pin, HIGH); // روشن کردن بیزر
+                                            // if (Buzzer_IsEnable)
+
+            delay(On_Off_Time_1Meen100 * 100); // 100 میلی‌ثانیه روشن
+
+            digitalWrite(buzzer_pin, LOW); // روشن کردن بیزر
+            delay(100);                    // 100 میلی‌ثانیه خاموش
+        }
+        delay(1000); // 1 ثانیه سکوت
+    }
+}
+
+void AllarmError(const int &CountInSec, const int &totalSecends, const int &On_Off_Time_1Meen100)
+{
+
+    for (int i = 0; i < CountInSec; i++)
+    {
+        for (int j = 0; j < totalSecends; j++)
         {
             digitalWrite(LOCAL_ALERT_PIN, HIGH); // روشن کردن بیزر
-            if (Buzzer_IsEnable)
-                digitalWrite(buzzer_pin, HIGH); // روشن کردن بیزر
-            delay(OnTime_1Meen100 * 100);       // 100 میلی‌ثانیه روشن
+
+            delay(On_Off_Time_1Meen100 * 100); // 100 میلی‌ثانیه روشن
+
             digitalWrite(LOCAL_ALERT_PIN, LOW); // روشن کردن بیزر
-            if (Buzzer_IsEnable)
-                digitalWrite(buzzer_pin, LOW); // خاموش کردن بیزر
-            delay(100);                        // 100 میلی‌ثانیه خاموش
+            delay(100);                         // 100 میلی‌ثانیه خاموش
         }
         delay(1000); // 1 ثانیه سکوت
     }
@@ -793,12 +829,14 @@ void resetFactoryConfig()
 
 void setAllPinModes()
 {
+
     pinMode(LocalControllerLedPin, OUTPUT);
     pinMode(Device_Is_Arm_Led_Pin, OUTPUT);
     pinMode(buzzer_pin, OUTPUT); // تنظیم پین بیزر به عنوان خروجی
     pinMode(LOCAL_ALERT_PIN, OUTPUT);
     pinMode(REMOTE_ALERT_PIN, OUTPUT);
 
+    pinMode(Sensor_pin_SW_420, INPUT_PULLDOWN);
     pinMode(pir_1_pin, INPUT);
 
     pinMode(Relay_1_pin, OUTPUT);
@@ -1511,21 +1549,21 @@ html += "</body></html>";
 
 void localLedTask(int count)
 {
-    for (int i = 0; i < count * 2; i++)
-    { // استفاده از LOCAL_LED_BLINK_COUNT
+    // for (int i = 0; i < count * 2; i++)
+    // { // استفاده از LOCAL_LED_BLINK_COUNT
 
-        digitalWrite(LOCAL_ALERT_PIN, HIGH);
-        if (Buzzer_IsEnable)
-            digitalWrite(buzzer_pin, HIGH);
-        // Serial.println("Local buzzer ON (buzzer_pin)");
-        vTaskDelay(150); // تأخیر بین هر تلاش
-        digitalWrite(LOCAL_ALERT_PIN, LOW);
-        if (Buzzer_IsEnable)
-            digitalWrite(buzzer_pin, LOW);
+    //     digitalWrite(LOCAL_ALERT_PIN, HIGH);
+    //     if (Buzzer_IsEnable)
+    //         digitalWrite(buzzer_pin, HIGH);
+    //     // Serial.println("Local buzzer ON (buzzer_pin)");
+    //     vTaskDelay(150); // تأخیر بین هر تلاش
+    //     digitalWrite(LOCAL_ALERT_PIN, LOW);
+    //     if (Buzzer_IsEnable)
+    //         digitalWrite(buzzer_pin, LOW);
 
-        // Serial.println("Local buzzer OFF (buzzer_pin)");
-        vTaskDelay(150); // تأخیر بین هر تلاش
-    }
+    //     // Serial.println("Local buzzer OFF (buzzer_pin)");
+    //     vTaskDelay(150); // تأخیر بین هر تلاش
+    // }
 }
 
 // تابع ارسال پیام هشدار به نودهای دیگر
@@ -1533,7 +1571,7 @@ void sendAlertMessage()
 {
     String _nodeId = nodeId = mesh.getNodeId(); // شماره نود
     String message = "{\"nodename\":\"" + nodeName + "\", \"nodeid\":" + String(nodeId) + ", \"message\":\"alert\"}";
-    Serial.println("Sending alert message: " + message);
+    // Serial.println("Sending alert message: " + message);
     broadcastToAll(message); // ارسال پیام هشدار به همه نودها
 }
 
@@ -1554,10 +1592,14 @@ int pirCount1 = 0;
 unsigned long lastPirUpdate1 = 0; // زمان آخرین تغییر در pirCount
 unsigned long lastResetTime1 = 0; // زمان آخرین ریست شدن pirCount
 
+const int adcResolution = 12; // دقت ADC
+float voltage;
+
 void checkAllPIR()
 {
+    pir_1_IsEnable = true; /// این خاط رو پاک کن پاک
     int separatorIndex = device_status.indexOf("1");
-    if (separatorIndex == -1)
+    if (separatorIndex == -1 && false)
     {
         // Serial.println("device is disarm");
         digitalWrite(LOCAL_ALERT_PIN, HIGH);
@@ -1580,24 +1622,36 @@ void checkAllPIR()
     }
     if (pir_1_IsEnable)
     {
+        int adcValue = analogRead(pir_1_pin); // خواندن مقدار آنالوگ از پین
+        voltage = adcValue * (3.3 / 4095.0);  // تبدیل مقدار ADC به ولتاژ
+        Serial.println(voltage);              // نمایش ولتاژ در سریال مانیتور
+        Serial.println(voltage);              // نمایش ولتاژ در سریال مانیتور
+        Serial.println(voltage);              // نمایش ولتاژ در سریال مانیتور
+        
         unsigned long currentMillis1 = millis(); // زمان جاری
 
         int pirStatus1 = digitalRead(pir_1_pin); // خواندن وضعیت سنسور PIR
+        if (pirStatus1 == LOW)
+        {
+            Serial.println("i am low belekharehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh   1111 " + String(pirCount1));
+        }
         if (pirStatus1 == HIGH)
         {
+
             vTaskDelay(50);
             pirCount1++;
             lastPirUpdate1 = currentMillis1;
-            Serial.println("pirCount1 : pin 13 :    " + String(pirCount1));
-            if (pirCount1 >= 2)
+            Serial.println("pir 1 Count  : pin 18 :    " + String(pirCount1));
+            if (pirCount1 >= 3)
             {
-                Serial.println("send alert from pir 1: pin 13 :");
-
-                sendAlertMessage();
-                localLedTask(2);
+                AllarmError(2, 2, 3);
                 pirCount1 = 0;
                 lastResetTime1 = currentMillis1;
             }
+        }
+        if (pirStatus1 == LOW)
+        {
+            Serial.println("i am low belekharehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh   2222 " + String(pirCount1));
         }
 
         if (currentMillis1 - lastResetTime1 >= 3000 && currentMillis1 - lastPirUpdate1 >= 1000)
@@ -1660,7 +1714,6 @@ bool reconnectMesh()
             {
                 Serial.println("in reconnectMesh while .... just me One Node id:   " + String(mesh.getNodeId()));
 
-
                 vTaskDelay(1000);
                 mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION);
                 mesh.init(ssidName, ssidPassword, &userScheduler, 5555);
@@ -1672,8 +1725,6 @@ bool reconnectMesh()
                 mesh.onNewConnection(&onNewConnection);
                 mesh.onDroppedConnection([](uint32_t nodeId)
                                          { Serial.println("Connection dropped with node: " + String(nodeId)); });
-            
-            
             }
 
             lastSuccessTime = millis();
@@ -2397,7 +2448,7 @@ void sendToSpecificNodes(String &msg)
 
         mesh.sendSingle(nodeId, msg); // ارسال پیام به نود موردنظر
 
-        Serial.println("Message sent to Node ID: " + nodeIdStr);
+        // Serial.println("Message sent to Node ID: " + nodeIdStr);
         vTaskDelay(50);
         // mesh.onReceive(&receivedCallback); // ثبت callback
     }
@@ -2610,14 +2661,18 @@ void setup()
     // Initialize DHT sensor
     dht.begin();
 
-    // Register tasks
-    if (xTaskCreate(reconnectMeshTask, "ReconnectMeshTask", 4096, NULL, 1, &taskReconnectMesh) != pdPASS)
-    {
-        Serial.println("Failed to create ReconnectMeshTask.");
-    }
+    // // Register tasks
+    // if (xTaskCreate(reconnectMeshTask, "ReconnectMeshTask", 4096, NULL, 1, &taskReconnectMesh) != pdPASS)
+    // {
+    //     Serial.println("Failed to create ReconnectMeshTask.");
+    // }
     if (xTaskCreate(checkAllPirTask, "taskCheckPIRs", 4096, NULL, 1, &taskcheckAllPir) != pdPASS)
     {
         Serial.println("Failed to create PIR Task.");
+    }
+    if (xTaskCreate(CheckSensor_SW_420, "__taskCheckSensor___SW_420", 4096, NULL, 1, &taskCheckSensor_SW_420) != pdPASS)
+    {
+        Serial.println("Failed to create __taskCheckSensor___SW_420 Task.");
     }
     // if (xTaskCreate(remoteButtonTask, "ButtonTask", 2048, NULL, 1, &buttonTaskHandle) != pdPASS)
     // {
@@ -2641,15 +2696,11 @@ void setup()
     Serial.println("Setup sim......................::::::::::::::::::::::::::::::::::::::::::");
     Serial.println("Setup sim......................::::::::::::::::::::::::::::::::::::::::::");
 
-
     SetupSim();
 
-
-
     Serial.println("Setup sim......................::::::::::::::::::::::::::::::::::::::::::");
     Serial.println("Setup sim......................::::::::::::::::::::::::::::::::::::::::::");
     Serial.println("Setup sim......................::::::::::::::::::::::::::::::::::::::::::");
-
 
     // Call remaining setup functions
     broadcastLocalDatabase();
@@ -2669,20 +2720,40 @@ void setup()
 
     Serial.println("Setup complete......................::::::::::::::::::::::::::::::::::::::::::");
     Serial.println("Setup complete......................::::::::::::::::::::::::::::::::::::::::::");
-  
-  
-     makeCall("+989335017186");
+
+    makeCall("+989335017186");
     Serial.println("Setup complete......................::::::::::::::::::::::::::::::::::::::::::");
     Serial.println("Setup complete......................::::::::::::::::::::::::::::::::::::::::::");
+}
+
+void CheckSensor_SW_420(void *parameter)
+{
+    while (true)
+    {
+        Serial.println("CheckSensor____SW_420            CheckSensor____SW_420!        CheckSensor_SW____420 ");
+
+        int sensorValue = digitalRead(Sensor_pin_SW_420); // خواندن وضعیت سنسور
+        if (sensorValue == HIGH)
+        { // اگر لرزشی تشخیص داده شود
+
+            VibrationAllarmError(3, 2, 1);
+            Serial.println("Vibratiooooooooooooon Detected!        " + String(sensorValue));
+        }
+        else
+        {
+            // Serial.println("No Viiiiiiiiibration.        " + String(sensorValue));
+        }
+        vTaskDelay(100); // تاخیر برای جلوگیری از نویز
+    }
 }
 
 void loop()
 {
 
+    // CheckSensor_SW_420();
     monitorInputSms();
     vTaskDelay(1000);
     CheckSpaceSensorTask();
-
 
     // HandleMeshStroryyyyyyyy();
     // بررسی اینکه آیا داده‌ای از سریال وارد شده است
