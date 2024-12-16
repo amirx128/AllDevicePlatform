@@ -11,9 +11,11 @@
 #include <map>
 #include <ArduinoJson.h>
 
-///
-
 #include <FS.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+
+///
 
 std::vector<String> mainNetworkList = {"1744193321", "3939444277", "2147483647", "4444", "5555"};
 std::set<String> receivedMessageIds; // مجموعه شناسه‌های پیام‌های دریافتی
@@ -69,7 +71,7 @@ const char *appConfigFilename = "/appConfigDataFile.txt"; // نام فایل ب�
 #define pir_3_pin 23
 #define Relay_1_pin 120
 
-#define Sensor_pin_SW_420 12
+#define SENSOR_SW_420_PIN 12
 
 #define Remote_Key_0_Pin 4
 #define Remote_Key_1_Pin 27
@@ -120,6 +122,7 @@ unsigned long lastReconnectAttempt = 0; // برای تایمر تلاش مجدد
 TaskHandle_t taskReconnectMesh;
 TaskHandle_t taskcheckAllPir;
 TaskHandle_t taskCheckSensor_SW_420;
+TaskHandle_t taskCheckSensor_Pmu;
 
 bool reconnectMeshTaskRunning = false;
 bool checkPIR1TaskRunning = false;
@@ -163,6 +166,7 @@ void AllarmError(const int &CountInSec, const int &totalSecends, const int &On_O
 void VibrationAllarmError(const int &CountInSec, const int &totalSecends, const int &On_Off_Time_1Meen100);
 String sendStartupSMS(String function_number, String function_msg);
 void CheckSensor_SW_420(void *parameter);
+void CheckMPUSensor();
 
 void reconnectMeshTask(void *parameter);
 void checkAllPirTask(void *parameter);
@@ -622,7 +626,7 @@ void VibrationAllarmError(const int &CountInSec, const int &totalSecends, const 
             digitalWrite(buzzer_pin, LOW); // روشن کردن بیزر
             delay(100);                    // 100 میلی‌ثانیه خاموش
         }
-        delay(1000); // 1 ثانیه سکوت
+        delay(50); // 1 ثانیه سکوت
     }
 }
 
@@ -831,12 +835,12 @@ void setAllPinModes()
 {
 
     pinMode(LocalControllerLedPin, OUTPUT);
-    pinMode(Device_Is_Arm_Led_Pin, OUTPUT);
+    // pinMode(Device_Is_Arm_Led_Pin, OUTPUT);
     pinMode(buzzer_pin, OUTPUT); // تنظیم پین بیزر به عنوان خروجی
     pinMode(LOCAL_ALERT_PIN, OUTPUT);
     pinMode(REMOTE_ALERT_PIN, OUTPUT);
 
-    pinMode(Sensor_pin_SW_420, INPUT_PULLDOWN);
+    pinMode(SENSOR_SW_420_PIN12, INPUT_PULLUP);
     pinMode(pir_1_pin, INPUT);
 
     pinMode(Relay_1_pin, OUTPUT);
@@ -971,9 +975,64 @@ String getLocalNodeInfoAsJson()
     serializeJson(doc, jsonString);
     return jsonString;
 }
+void SaveLog(const String &logType, long dateTime, const String &log)
+{
+
+    // todo
+    //  SaveLog("INFO", 1672457693, "System started");
+    //  SaveLog("ERROR", 1672457745, "Failed to connect to WiFi");
+    //  SaveLog("DEBUG", 1672457800, "Memory usage: 50%");
+    Serial.println("SaveLog: " + logType + " - " + String(dateTime) + " - " + log);
+    String logDataFilename = "\\todo";
+    // خواندن محتوای قبلی فایل
+    String fileContent = "";
+    File file = SPIFFS.open(logDataFilename, FILE_READ);
+
+    if (file)
+    {
+        while (file.available())
+        {
+            fileContent += char(file.read());
+        }
+        file.close();
+    }
+
+    // اضافه کردن لاگ جدید
+    fileContent += logType + "|" + String(dateTime) + "|" + log + "\n";
+
+    // نوشتن محتوای جدید در فایل
+    file = SPIFFS.open(logDataFilename, FILE_WRITE);
+    if (file)
+    {
+        file.print(fileContent);
+        file.close();
+    }
+}
 
 void renderingPageHtml()
 {
+    server.on("/check_SPIFFS_Logs", HTTP_GET, [](AsyncWebServerRequest *request)
+              {
+        String response = "=== SPIFFS Logs ===\n";
+String logDataFilename ="\\todo";
+        // بررسی وضعیت SPIFFS
+        if (!SPIFFS.begin(true)) {
+            response += "Failed to initialize SPIFFS.\n";
+        } else {
+            File file = SPIFFS.open(logDataFilename, FILE_READ);
+            if (!file) {
+                response += "Error: Unable to open " + String(logDataFilename) + "\n";
+            } else {
+                response += "=== Content of " + String(logDataFilename) + " ===\n";
+                while (file.available()) {
+                    response += (char)file.read(); // خواندن محتوای فایل
+                }
+                file.close();
+            }
+        }
+
+        // ارسال پاسخ به مرورگر
+        request->send(200, "text/plain", response); });
 
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
               {
@@ -1588,9 +1647,9 @@ void triggerRemoteLed()
     }
 }
 
-int pirCount1 = 0;
-unsigned long lastPirUpdate1 = 0; // زمان آخرین تغییر در pirCount
-unsigned long lastResetTime1 = 0; // زمان آخرین ریست شدن pirCount
+int pirCount = 0;
+unsigned long lastPirUpdate = 0; // زمان آخرین تغییر در pirCount
+unsigned long lastResetTime = 0; // زمان آخرین ریست شدن pirCount
 
 const int adcResolution = 12; // دقت ADC
 float voltage;
@@ -1622,42 +1681,29 @@ void checkAllPIR()
     }
     if (pir_1_IsEnable)
     {
-        int adcValue = analogRead(pir_1_pin); // خواندن مقدار آنالوگ از پین
-        voltage = adcValue * (3.3 / 4095.0);  // تبدیل مقدار ADC به ولتاژ
-        Serial.println(voltage);              // نمایش ولتاژ در سریال مانیتور
-        Serial.println(voltage);              // نمایش ولتاژ در سریال مانیتور
-        Serial.println(voltage);              // نمایش ولتاژ در سریال مانیتور
-        
         unsigned long currentMillis1 = millis(); // زمان جاری
 
         int pirStatus1 = digitalRead(pir_1_pin); // خواندن وضعیت سنسور PIR
-        if (pirStatus1 == LOW)
-        {
-            Serial.println("i am low belekharehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh   1111 " + String(pirCount1));
-        }
+
         if (pirStatus1 == HIGH)
         {
 
             vTaskDelay(50);
-            pirCount1++;
-            lastPirUpdate1 = currentMillis1;
-            Serial.println("pir 1 Count  : pin 18 :    " + String(pirCount1));
-            if (pirCount1 >= 3)
+            pirCount++;
+            lastPirUpdate = currentMillis1;
+            Serial.println("pir 1 Count  : pin 18 :    " + String(pirCount));
+            if (pirCount >= 3)
             {
                 AllarmError(2, 2, 3);
-                pirCount1 = 0;
-                lastResetTime1 = currentMillis1;
+                pirCount = 0;
+                lastResetTime = currentMillis1;
             }
         }
-        if (pirStatus1 == LOW)
-        {
-            Serial.println("i am low belekharehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh   2222 " + String(pirCount1));
-        }
 
-        if (currentMillis1 - lastResetTime1 >= 3000 && currentMillis1 - lastPirUpdate1 >= 1000)
+        if (currentMillis1 - lastResetTime >= 3000 && currentMillis1 - lastPirUpdate >= 1000)
         {
-            pirCount1 = 0;
-            lastResetTime1 = currentMillis1;
+            pirCount = 0;
+            lastResetTime = currentMillis1;
             // Serial.println("pirCount1 reset due to inactivity.: pin 13 ");
         }
     }
@@ -2631,9 +2677,35 @@ void HandleMeshStroryyyyyyyy()
 
     lastBroadcastTime = currentTime; // به‌روزرسانی زمان ارسال
 }
+Adafruit_MPU6050 mpu;
+
+void setupMpuSensor()
+{
+
+    Serial.begin(115200);
+    while (!Serial)
+        delay(10); // صبر برای سریال
+
+    if (!mpu.begin())
+    {
+        Serial.println("خطا در پیدا کردن MPU6050!");
+        while (1)
+            ;
+    }
+
+    Serial.println("MPU6050 متصل شد.");
+    mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
+    //  mpu.setSampleRate(50); // تنظیم نرخ نمونه‌برداری روی 50 هرتز
+    // mpu.setDLPFMode(MPU6050_DLPF_5HZ); // تنظیم LPF روی 5 هرتز
+
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+}
 
 void setup()
 {
+    setupMpuSensor();
+
     reconnectAttempts = 0;
     Serial.begin(9600);
     blinkLED(LocalControllerLedPin, 10, 500); // 10 بار چشمک با فاصله 500 میلی‌ثانیه
@@ -2674,6 +2746,11 @@ void setup()
     {
         Serial.println("Failed to create __taskCheckSensor___SW_420 Task.");
     }
+
+    //  if (xTaskCreate(CheckMPUSensor, "__task_CheckSensor_Pmu__", 4096, NULL, 1, &taskCheckSensor_Pmu) != pdPASS)
+    // {
+    //     Serial.println("Failed to create __taskCheckSensor___SW_420 Task.");
+    // }
     // if (xTaskCreate(remoteButtonTask, "ButtonTask", 2048, NULL, 1, &buttonTaskHandle) != pdPASS)
     // {
     //     Serial.println("Failed to create Button Task.");
@@ -2728,11 +2805,12 @@ void setup()
 
 void CheckSensor_SW_420(void *parameter)
 {
+
     while (true)
     {
-        Serial.println("CheckSensor____SW_420            CheckSensor____SW_420!        CheckSensor_SW____420 ");
+        // Serial.println("CheckSensor____SW_420            CheckSensor____SW_420!        CheckSensor_SW____420 ");
 
-        int sensorValue = digitalRead(Sensor_pin_SW_420); // خواندن وضعیت سنسور
+        int sensorValue = digitalRead(SENSOR_SW_420_PIN12); // خواندن وضعیت سنسور
         if (sensorValue == HIGH)
         { // اگر لرزشی تشخیص داده شود
 
@@ -2743,16 +2821,72 @@ void CheckSensor_SW_420(void *parameter)
         {
             // Serial.println("No Viiiiiiiiibration.        " + String(sensorValue));
         }
-        vTaskDelay(100); // تاخیر برای جلوگیری از نویز
+        vTaskDelay(10); // تاخیر برای جلوگیری از نویز
     }
+}
+
+void CheckMPUSensor()
+{
+    vTaskDelay(50);
+    /* خواندن داده‌های سنسور */
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+
+    // متغیرهای جدید برای مقادیر رند شده
+    float accelX = round(a.acceleration.x * 10) / 10.0;
+    float accelY = round(a.acceleration.y * 10) / 10.0;
+    float accelZ = round(a.acceleration.z * 10) / 10.0;
+
+    float gyroX = round(g.gyro.x * 10) / 10.0;
+    float gyroY = round(g.gyro.y * 10) / 10.0;
+    float gyroZ = round(g.gyro.z * 10) / 10.0;
+
+    if (gyroX == 0 && gyroY == 0 && gyroZ == 0)
+        // Serial.println("all gyroX gyroX  gyroX is 0000000000000000000000");
+
+        // بررسی مقادیر رند شده برای صفر بودن
+        if (accelX == 0 && accelY == 0 && accelZ == 0)
+        {
+            // Serial.println("all accelX accelX accelX  is 0000000000000000000000");
+            if (gyroX == 0 && gyroY == 0 && gyroZ == 0)
+            {
+                Serial.println("all is 0000000000000000000000");
+                return;
+            }
+        }
+    /* نمایش داده‌ها در سریال مانیتور */
+    Serial.print("shetab: ");
+    Serial.print("the      X  : ");
+    Serial.print(a.acceleration.x, 1);
+    Serial.print(", the      Y   ");
+    Serial.print(a.acceleration.y, 1);
+    Serial.print(", the      Z  : ");
+    Serial.print(a.acceleration.z, 1);
+    Serial.println(" m/s^2");
+
+    Serial.print("Zhiroskop ");
+    Serial.print("X: ");
+    Serial.print(g.gyro.x, 1);
+    Serial.print(", Y: ");
+    Serial.print(g.gyro.y, 1);
+    Serial.print(", Z: ");
+    Serial.print(g.gyro.z, 1);
+    Serial.println(" rad/s");
+
+    Serial.print("damaa");
+    Serial.print(temp.temperature);
+    Serial.println(" °C");
+
+    delay(50);
 }
 
 void loop()
 {
 
+    CheckMPUSensor();
     // CheckSensor_SW_420();
     monitorInputSms();
-    vTaskDelay(1000);
+    // vTaskDelay(10);
     CheckSpaceSensorTask();
 
     // HandleMeshStroryyyyyyyy();
